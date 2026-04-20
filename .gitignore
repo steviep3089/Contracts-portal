@@ -3,3 +3,13 @@ dist/
 .env
 .env.*
 *.log
+
+# Local app/dev artifacts
+.expo/
+
+# Supabase local CLI/runtime artifacts
+supabase/.temp/
+supabase/.branches/
+
+# Office temp/lock files
+~$*
