@@ -1104,7 +1104,11 @@ export default function Dashboard({ user, onSignOut }) {
     setCompletedFormsError("");
 
     const restricted = !["admin", "manager"].includes(currentAppRole);
-    if (restricted && currentUserContractIds.length === 0) {
+    const accessibleContracts = restricted
+      ? contracts.filter((contract) => currentUserContractIds.includes(contract.id))
+      : [];
+
+    if (restricted && accessibleContracts.length === 0) {
       setCompletedForms([]);
       setLoadingCompletedForms(false);
       return;
@@ -1118,7 +1122,20 @@ export default function Dashboard({ user, onSignOut }) {
       .order("created_at", { ascending: false });
 
     if (restricted) {
-      query = query.in("contract_id", currentUserContractIds);
+      const idFilters = accessibleContracts
+        .map((contract) => String(contract.id || "").trim())
+        .filter(Boolean)
+        .map((id) => `contract_id.eq.${id}`);
+
+      const numberFilters = accessibleContracts
+        .map((contract) => String(contract.contractNumber || "").trim())
+        .filter(Boolean)
+        .map((number) => `contract_number.eq.${number}`);
+
+      const orFilters = [...idFilters, ...numberFilters].join(",");
+      if (orFilters) {
+        query = query.or(orFilters);
+      }
     }
 
     const { data, error } = await query;
