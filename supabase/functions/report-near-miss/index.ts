@@ -114,6 +114,42 @@ function cellValue(value: string) {
   return { userEnteredValue: { stringValue: value } };
 }
 
+function pad2(value: number) {
+  return String(value).padStart(2, "0");
+}
+
+function lastSundayUtc(year: number, monthIndex: number) {
+  const lastDay = new Date(Date.UTC(year, monthIndex + 1, 0, 1, 0, 0));
+  const day = lastDay.getUTCDay();
+  lastDay.setUTCDate(lastDay.getUTCDate() - day);
+  return lastDay;
+}
+
+function isBritishSummerTime(dateUtc: Date) {
+  const year = dateUtc.getUTCFullYear();
+  const bstStart = lastSundayUtc(year, 2); // March
+  const bstEnd = lastSundayUtc(year, 9); // October
+  return dateUtc >= bstStart && dateUtc < bstEnd;
+}
+
+function formatLondonDateTime(value: string) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return value;
+  }
+
+  const offsetHours = isBritishSummerTime(date) ? 1 : 0;
+  const shifted = new Date(date.getTime() + offsetHours * 60 * 60 * 1000);
+
+  const dd = pad2(shifted.getUTCDate());
+  const mm = pad2(shifted.getUTCMonth() + 1);
+  const yyyy = shifted.getUTCFullYear();
+  const hh = pad2(shifted.getUTCHours());
+  const min = pad2(shifted.getUTCMinutes());
+  const ss = pad2(shifted.getUTCSeconds());
+  return `${dd}/${mm}/${yyyy} ${hh}:${min}:${ss}`;
+}
+
 async function appendNearMissToSheet(values: {
   submittedAt: string;
   reportedAt: string;
@@ -127,22 +163,6 @@ async function appendNearMissToSheet(values: {
   }
 
   const accessToken = await getGoogleAccessToken();
-
-  const formatLondonDateTime = (value: string) => {
-    const date = new Date(value);
-    return new Intl.DateTimeFormat("en-GB", {
-      timeZone: "Europe/London",
-      year: "numeric",
-      month: "2-digit",
-      day: "2-digit",
-      hour: "2-digit",
-      minute: "2-digit",
-      second: "2-digit",
-      hour12: false,
-    })
-      .format(date)
-      .replace(",", "");
-  };
 
   const rowValues = [
     formatLondonDateTime(values.submittedAt),
