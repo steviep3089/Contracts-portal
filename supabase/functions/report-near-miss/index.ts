@@ -121,8 +121,6 @@ async function appendNearMissToSheet(values: {
   site: string;
   nearMissDetails: string;
   actionsTaken: string;
-  reportedByEmail: string;
-  source: string;
 }) {
   if (!Number.isFinite(NEAR_MISS_SHEET_ID)) {
     throw new Error("Invalid NEAR_MISS_SHEET_ID");
@@ -130,15 +128,29 @@ async function appendNearMissToSheet(values: {
 
   const accessToken = await getGoogleAccessToken();
 
+  const formatLondonDateTime = (value: string) => {
+    const date = new Date(value);
+    return new Intl.DateTimeFormat("en-GB", {
+      timeZone: "Europe/London",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hour12: false,
+    })
+      .format(date)
+      .replace(",", "");
+  };
+
   const rowValues = [
-    values.submittedAt,
-    values.reportedAt,
+    formatLondonDateTime(values.submittedAt),
     values.reporterName,
     values.site,
+    formatLondonDateTime(values.reportedAt),
     values.nearMissDetails,
     values.actionsTaken,
-    values.reportedByEmail,
-    values.source,
   ].map((value) => cellValue(value));
 
   const response = await fetch(
@@ -269,8 +281,6 @@ Deno.serve(async (req) => {
       site,
       nearMissDetails,
       actionsTaken,
-      reportedByEmail,
-      source,
     });
 
     return new Response(
