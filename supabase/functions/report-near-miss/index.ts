@@ -194,12 +194,6 @@ Deno.serve(async (req) => {
 
     const authHeader = req.headers.get("Authorization") || "";
     const token = authHeader.toLowerCase().startsWith("bearer ") ? authHeader.slice(7).trim() : "";
-    if (!token) {
-      return new Response(JSON.stringify({ success: false, error: "Missing bearer token." }), {
-        status: 401,
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
-      });
-    }
 
     const body = (await req.json().catch(() => ({}))) as NearMissPayload;
 
@@ -227,23 +221,24 @@ Deno.serve(async (req) => {
 
     const client = createClient(supabaseUrl, serviceRole);
 
-    const {
-      data: { user },
-      error: authError,
-    } = await client.auth.getUser(token);
+    let userId: string | null = null;
+    let userEmail = "";
+    if (token) {
+      const {
+        data: { user },
+        error: authError,
+      } = await client.auth.getUser(token);
 
-    if (authError || !user?.id) {
-      return new Response(
-        JSON.stringify({ success: false, error: `Unauthorized: ${authError?.message || "invalid token"}` }),
-        {
-          status: 401,
-          headers: { ...corsHeaders, "Content-Type": "application/json" },
-        }
-      );
+      if (authError) {
+        console.warn("report-near-miss auth warning:", authError.message);
+      } else if (user?.id) {
+        userId = user.id;
+        userEmail = String(user.email || "");
+      }
     }
 
     const submittedAt = new Date();
-    const reportedByEmail = String(user.email || "");
+    const reportedByEmail = userEmail;
 
     const { data: inserted, error: insertError } = await client
       .from("near_miss_reports")
@@ -254,7 +249,7 @@ Deno.serve(async (req) => {
         near_miss_details: nearMissDetails,
         actions_taken: actionsTaken,
         source,
-        reported_by_user_id: user.id,
+        reported_by_user_id: userId,
         reported_by_email: reportedByEmail,
       })
       .select("id")
