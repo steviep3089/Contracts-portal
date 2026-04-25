@@ -9,8 +9,10 @@ const GOOGLE_SERVICE_ACCOUNT_JSON = Deno.env.get("GOOGLE_SERVICE_ACCOUNT_JSON") 
 const NEAR_MISS_SPREADSHEET_ID =
   Deno.env.get("NEAR_MISS_SPREADSHEET_ID") || "1Ov0k1pa-l7X24c2y-CRSMjwKnVEUgIxpyMOejleVZvA";
 const NEAR_MISS_SHEET_ID = Number(Deno.env.get("NEAR_MISS_SHEET_ID") || "854852343");
+const NEAR_MISS_SHEET_RANGE = Deno.env.get("NEAR_MISS_SHEET_RANGE") || "A:F";
 
 type NearMissPayload = {
+  submittedAt?: string;
   reportedAt?: string;
   reporterName?: string;
   site?: string;
@@ -110,10 +112,6 @@ async function getGoogleAccessToken() {
   return tokenData.access_token as string;
 }
 
-function cellValue(value: string) {
-  return { userEnteredValue: { stringValue: value } };
-}
-
 function pad2(value: number) {
   return String(value).padStart(2, "0");
 }
@@ -150,6 +148,24 @@ function formatLondonDateTime(value: string) {
   return `${dd}/${mm}/${yyyy} ${hh}:${min}:${ss}`;
 }
 
+function formatLondonTimestampUs(value: string) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return value;
+  }
+
+  const offsetHours = isBritishSummerTime(date) ? 1 : 0;
+  const shifted = new Date(date.getTime() + offsetHours * 60 * 60 * 1000);
+
+  const dd = shifted.getUTCDate();
+  const mm = shifted.getUTCMonth() + 1;
+  const yyyy = shifted.getUTCFullYear();
+  const hh = shifted.getUTCHours();
+  const min = pad2(shifted.getUTCMinutes());
+  const ss = pad2(shifted.getUTCSeconds());
+  return `${mm}/${dd}/${yyyy} ${hh}:${min}:${ss}`;
+}
+
 async function appendNearMissToSheet(values: {
   submittedAt: string;
   reportedAt: string;
@@ -158,24 +174,66 @@ async function appendNearMissToSheet(values: {
   nearMissDetails: string;
   actionsTaken: string;
 }) {
-  if (!Number.isFinite(NEAR_MISS_SHEET_ID)) {
-    throw new Error("Invalid NEAR_MISS_SHEET_ID");
-  }
-
   const accessToken = await getGoogleAccessToken();
 
+  let targetSheetId = Number.isFinite(NEAR_MISS_SHEET_ID) ? NEAR_MISS_SHEET_ID : null;
+  let targetRange = NEAR_MISS_SHEET_RANGE;
+  if (Number.isFinite(NEAR_MISS_SHEET_ID)) {
+    const metaRes = await fetch(
+      `https://sheets.googleapis.com/v4/spreadsheets/${NEAR_MISS_SPREADSHEET_ID}?fields=sheets(properties(sheetId,title))`,
+      {
+        headers: { Authorization: `Bearer ${accessToken}` },
+      }
+    );
+    if (metaRes.ok) {
+      const metaJson = await metaRes.json();
+      const matchedSheet = (metaJson?.sheets || []).find(
+        (s: { properties?: { sheetId?: number; title?: string } }) =>
+          Number(s?.properties?.sheetId) === NEAR_MISS_SHEET_ID
+      );
+      const title = String(matchedSheet?.properties?.title || "").trim();
+      const resolvedSheetId = Number(matchedSheet?.properties?.sheetId);
+      if (Number.isFinite(resolvedSheetId)) {
+        targetSheetId = resolvedSheetId;
+      }
+      if (title) {
+        targetRange = `'${title.replace(/'/g, "''")}'!A:F`;
+      }
+    }
+  }
+
   const rowValues = [
-    formatLondonDateTime(values.submittedAt),
+    formatLondonTimestampUs(values.submittedAt),
     values.reporterName,
     values.site,
     formatLondonDateTime(values.reportedAt),
     values.nearMissDetails,
     values.actionsTaken,
-  ].map((value) => cellValue(value));
+  ];
 
   const response = await fetch(
-    `https://sheets.googleapis.com/v4/spreadsheets/${NEAR_MISS_SPREADSHEET_ID}:batchUpdate`,
+    `https://sheets.googleapis.com/v4/spreadsheets/${NEAR_MISS_SPREADSHEET_ID}/values/${encodeURIComponent(targetRange)}:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS`,
     {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        range: targetRange,
+        majorDimension: "ROWS",
+        values: [rowValues],
+      }),
+    }
+  );
+
+  const responseJson = await response.json();
+  if (!response.ok) {
+    throw new Error(responseJson?.error?.message || "Failed to append near miss to Google Sheet");
+  }
+
+  if (targetSheetId != null) {
+    await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${NEAR_MISS_SPREADSHEET_ID}:batchUpdate`, {
       method: "POST",
       headers: {
         Authorization: `Bearer ${accessToken}`,
@@ -184,20 +242,24 @@ async function appendNearMissToSheet(values: {
       body: JSON.stringify({
         requests: [
           {
-            appendCells: {
-              sheetId: NEAR_MISS_SHEET_ID,
-              rows: [{ values: rowValues }],
-              fields: "userEnteredValue",
+            sortRange: {
+              range: {
+                sheetId: targetSheetId,
+                startRowIndex: 1,
+                startColumnIndex: 0,
+                endColumnIndex: 6,
+              },
+              sortSpecs: [
+                {
+                  dimensionIndex: 0,
+                  sortOrder: "ASCENDING",
+                },
+              ],
             },
           },
         ],
       }),
-    }
-  );
-
-  const responseJson = await response.json();
-  if (!response.ok) {
-    throw new Error(responseJson?.error?.message || "Failed to append near miss to Google Sheet");
+    });
   }
 }
 
@@ -229,6 +291,7 @@ Deno.serve(async (req) => {
 
     const body = (await req.json().catch(() => ({}))) as NearMissPayload;
 
+    const submittedAtIsoRaw = String(body.submittedAt || "").trim();
     const reportedAtIso = String(body.reportedAt || "").trim();
     const reporterName = String(body.reporterName || "").trim();
     const site = String(body.site || "").trim();
@@ -251,6 +314,17 @@ Deno.serve(async (req) => {
       });
     }
 
+    let parsedSubmittedAt: Date | null = null;
+    if (submittedAtIsoRaw) {
+      parsedSubmittedAt = new Date(submittedAtIsoRaw);
+      if (Number.isNaN(parsedSubmittedAt.getTime())) {
+        return new Response(JSON.stringify({ success: false, error: "Invalid submittedAt value." }), {
+          status: 400,
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        });
+      }
+    }
+
     const client = createClient(supabaseUrl, serviceRole);
 
     let userId: string | null = null;
@@ -269,7 +343,7 @@ Deno.serve(async (req) => {
       }
     }
 
-    const submittedAt = new Date();
+    const submittedAt = parsedSubmittedAt || new Date();
     const reportedByEmail = userEmail;
 
     const { data: inserted, error: insertError } = await client

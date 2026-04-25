@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { jsPDF } from "jspdf";
 import { FunctionsFetchError, FunctionsHttpError, FunctionsRelayError } from "@supabase/supabase-js";
 import { supabase } from "../supabase";
@@ -140,6 +140,16 @@ function buildTodayIsoDate() {
   const m = String(d.getMonth() + 1).padStart(2, "0");
   const day = String(d.getDate()).padStart(2, "0");
   return `${y}-${m}-${day}`;
+}
+
+function buildNowLocalDateTimeValue() {
+  const d = new Date();
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  const hh = String(d.getHours()).padStart(2, "0");
+  const mm = String(d.getMinutes()).padStart(2, "0");
+  return `${y}-${m}-${day}T${hh}:${mm}`;
 }
 
 function buildDateAndTimeParts(timestamp) {
@@ -535,7 +545,290 @@ async function generateA4Pdf(data, options = {}) {
   doc.save(fileName);
 }
 
+function formatYesNo(value) {
+  if (value === true) return "Yes";
+  if (value === false) return "No";
+  return "-";
+}
+
+function displaySignatureValue(value) {
+  const text = String(value || "").trim();
+  if (!text) return "-";
+  if (text.startsWith("data:image/")) return "Captured signature";
+  return text;
+}
+
+async function generateSelfCertA4Pdf(data, options = {}) {
+  const { preview = false } = options;
+  const doc = new jsPDF({ orientation: "portrait", unit: "mm", format: "a4" });
+  const pageWidth = 210;
+  const pageHeight = 297;
+  const margin = 12;
+  const bottomMargin = 16;
+  const contentWidth = pageWidth - margin * 2;
+  const labelW = 62;
+  const valueW = contentWidth - labelW;
+  const yesNoPromptW = 104;
+  const yesW = 35;
+  const noW = contentWidth - yesNoPromptW - yesW;
+  let y = 15;
+
+  const formatDate = (value) => {
+    if (!value) return "-";
+    const dt = new Date(value);
+    if (Number.isNaN(dt.getTime())) return String(value);
+    const dd = String(dt.getDate()).padStart(2, "0");
+    const mm = String(dt.getMonth() + 1).padStart(2, "0");
+    const yyyy = dt.getFullYear();
+    return `${dd}/${mm}/${yyyy}`;
+  };
+
+  const ensureSpace = (requiredHeight) => {
+    if (y + requiredHeight <= pageHeight - bottomMargin) return;
+    doc.addPage("a4", "portrait");
+    y = margin;
+  };
+
+  const drawWrappedText = (text, x, topY, width, lineHeight = 3.8, fontSize = 8.5) => {
+    doc.setFont("helvetica", "normal");
+    doc.setFontSize(fontSize);
+    const lines = doc.splitTextToSize(String(text || ""), width);
+    doc.text(lines, x, topY);
+    return lines.length * lineHeight;
+  };
+
+  const drawLabeledRow = (label, value, rowHeight = 8) => {
+    ensureSpace(rowHeight + 1);
+    doc.rect(margin, y, labelW, rowHeight);
+    doc.rect(margin + labelW, y, valueW, rowHeight);
+
+    doc.setFont("helvetica", "normal");
+    doc.setFontSize(9);
+    doc.text(label, margin + 2, y + 5.2);
+
+    const valueLines = doc.splitTextToSize(String(value || "-"), valueW - 4);
+    doc.text(valueLines, margin + labelW + 2, y + 5.2);
+    y += rowHeight;
+  };
+
+  const drawYesNoRow = (question, value) => {
+    const rowH = 8;
+    ensureSpace(rowH + 1);
+    doc.rect(margin, y, yesNoPromptW, rowH);
+    doc.rect(margin + yesNoPromptW, y, yesW, rowH);
+    doc.rect(margin + yesNoPromptW + yesW, y, noW, rowH);
+
+    doc.setFont("helvetica", "normal");
+    doc.setFontSize(9);
+    doc.text(question, margin + 2, y + 5.2);
+
+    const selected = formatYesNo(value);
+    if (selected === "Yes") {
+      doc.setFont("helvetica", "bold");
+      doc.text("Yes", margin + yesNoPromptW + yesW / 2, y + 5.2, { align: "center" });
+    } else if (selected === "No") {
+      doc.setFont("helvetica", "bold");
+      doc.text("No", margin + yesNoPromptW + yesW + noW / 2, y + 5.2, { align: "center" });
+    }
+
+    y += rowH;
+  };
+
+  const drawSignatureInCell = (signature, x, topY, width, height) => {
+    const sig = String(signature || "").trim();
+    if (!sig) return;
+
+    try {
+      if (sig.startsWith("data:image/")) {
+        doc.addImage(sig, "PNG", x + 2, topY + 2, width - 4, height - 4);
+        return;
+      }
+    } catch {
+      // Fall through and render text fallback.
+    }
+
+    doc.setFont("helvetica", "normal");
+    doc.setFontSize(8);
+    doc.text(displaySignatureValue(sig), x + 2, topY + 5.5);
+  };
+
+  const logoDataUrl = await getHeaderLogoDataUrl();
+  if (logoDataUrl) {
+    doc.addImage(logoDataUrl, "PNG", pageWidth - margin - 38, y - 2, 38, 9);
+  }
+
+  doc.setFont("helvetica", "bold");
+  doc.setTextColor(0, 32, 96);
+  doc.setFontSize(22);
+  doc.text("Part 1 - Sickness Self-Certification", margin, y + 4);
+  doc.setTextColor(0, 0, 0);
+  y += 14;
+
+  doc.setFont("helvetica", "normal");
+  doc.setFontSize(11);
+  y += drawWrappedText(
+    "To be completed by Employee for illnesses of 7 days or fewer (including weekends)",
+    margin,
+    y,
+    contentWidth,
+    4.5,
+    11
+  ) + 1;
+
+  doc.setTextColor(200, 0, 0);
+  y += drawWrappedText(
+    "For longer term absences, this form will cover a maximum of 7 calendar days before the start date of a doctor's note.",
+    margin,
+    y,
+    contentWidth,
+    4.5,
+    11
+  ) + 1;
+  doc.setTextColor(0, 0, 0);
+
+  y += drawWrappedText(
+    "Please read the rules and procedures set out in the Company's Sickness Absence policy before completing this form.",
+    margin,
+    y,
+    contentWidth,
+    4.5,
+    11
+  ) + 3;
+
+  drawLabeledRow("Name:", data.employee_name);
+  drawLabeledRow("Department:", data.department);
+  drawLabeledRow("Employee Number:", data.employee_number);
+  drawLabeledRow("First day of absence:", formatDate(data.first_day_absence));
+  drawLabeledRow("Working days lost:", data.working_days_lost ?? "-");
+  drawLabeledRow("Notification of absence made to:", data.notification_made_to);
+
+  const reasonText = String(data.reason_and_symptoms || "-");
+  const reasonLines = doc.splitTextToSize(reasonText, valueW - 4);
+  const reasonHeight = Math.max(24, reasonLines.length * 4 + 7);
+  ensureSpace(reasonHeight + 1);
+  doc.rect(margin, y, labelW, reasonHeight);
+  doc.rect(margin + labelW, y, valueW, reasonHeight);
+  doc.setFont("helvetica", "normal");
+  doc.setFontSize(9);
+  doc.text("Reason for absence and symptoms:", margin + 2, y + 5.2);
+  doc.text(reasonLines, margin + labelW + 2, y + 5.2);
+  y += reasonHeight;
+
+  const injuryHowText =
+    String(data.injury_details || "").trim() || (data.injury_occurred === false ? "No injury reported" : "-");
+  const injuryHowLines = doc.splitTextToSize(injuryHowText, valueW - 6);
+  const injuryHeight = Math.max(42, injuryHowLines.length * 4 + 24);
+  ensureSpace(injuryHeight + 1);
+  doc.rect(margin, y, labelW, injuryHeight);
+  doc.rect(margin + labelW, y, valueW, injuryHeight);
+  const injurySplitY = y + injuryHeight / 2;
+  doc.line(margin + labelW, injurySplitY, margin + labelW + valueW, injurySplitY);
+  doc.setFont("helvetica", "normal");
+  doc.setFontSize(9);
+  const injuryLeftWidth = labelW - 4;
+  const leftLineHeight = 3.6;
+  const injuryPromptLines = doc.splitTextToSize(
+    "If an injury, specify how it occurred, eg. motor accident:",
+    injuryLeftWidth
+  );
+  let leftY = y + 5.2;
+  doc.text(injuryPromptLines, margin + 2, leftY);
+  leftY += injuryPromptLines.length * leftLineHeight + 1;
+
+  const accidentQuestionLines = doc.splitTextToSize("Did it happen at work?", injuryLeftWidth);
+  leftY = Math.max(leftY, injurySplitY + 4.6);
+  doc.text(accidentQuestionLines, margin + 2, leftY);
+  leftY += accidentQuestionLines.length * leftLineHeight + 1;
+
+  const injuryDetailPromptLines = doc.splitTextToSize("If Yes, please provide full details", injuryLeftWidth);
+  doc.text(injuryDetailPromptLines, margin + 2, leftY);
+
+  doc.text(injuryHowLines, margin + labelW + 2, y + 5.2);
+  doc.setFont("helvetica", "bold");
+  doc.text(formatYesNo(data.injury_occurred), margin + labelW + 2, injurySplitY + 5.2);
+  y += injuryHeight;
+
+  drawYesNoRow("Did you seek medical advice?", data.sought_medical_advice);
+  drawYesNoRow("Did you consult your doctor?", data.consulted_doctor_again);
+  drawYesNoRow("Did you visit a hospital or clinic?", data.visited_hospital_or_clinic);
+
+  y += 4;
+  y += drawWrappedText(
+    "I understand that if I provide inaccurate or false information about my absence it may be treated as gross misconduct, which would result in my summary dismissal from the Company.",
+    margin,
+    y,
+    contentWidth,
+    3.8,
+    8.5
+  ) + 3;
+
+  const sigLabelW = 48;
+  const sigValueW = contentWidth - sigLabelW;
+  const sigRowH = 13;
+  ensureSpace(sigRowH * 3 + 4);
+
+  doc.rect(margin, y, sigLabelW, sigRowH);
+  doc.rect(margin + sigLabelW, y, sigValueW, sigRowH);
+  doc.setFont("helvetica", "normal");
+  doc.setFontSize(9);
+  doc.text("Employee's Signature:", margin + 2, y + 5.2);
+  drawSignatureInCell(data.employee_signature, margin + sigLabelW, y, sigValueW, sigRowH);
+  y += sigRowH;
+
+  doc.rect(margin, y, sigLabelW, sigRowH);
+  doc.rect(margin + sigLabelW, y, sigValueW, sigRowH);
+  doc.text("Manager's Signature:", margin + 2, y + 5.2);
+  drawSignatureInCell(data.manager_signature, margin + sigLabelW, y, sigValueW, sigRowH);
+  y += sigRowH;
+
+  doc.rect(margin, y, sigLabelW, sigRowH);
+  doc.rect(margin + sigLabelW, y, sigValueW, sigRowH);
+  doc.text("Date:", margin + 2, y + 5.2);
+  doc.text(
+    formatDate(data.manager_signed_at || data.employee_signed_at || data.created_at),
+    margin + sigLabelW + 2,
+    y + 5.2
+  );
+  y += sigRowH + 3;
+
+  doc.setFont("helvetica", "bold");
+  doc.setFontSize(9);
+  y += drawWrappedText(
+    "Once completed please forward Part 1 (HR01/F01) to the Payroll Department payroll@holcim.co.uk and proceed to complete Part 2 (HR01/F02).",
+    margin,
+    y,
+    contentWidth,
+    4,
+    9
+  );
+
+  doc.setFont("helvetica", "normal");
+  doc.setFontSize(7);
+  doc.text(
+    "HR01/F01/Part 1 - Sickness Self-Certification/v1.3/08.04.2025",
+    margin,
+    pageHeight - 6
+  );
+
+  const completedAt = data.created_at || new Date().toISOString();
+  const { datePart, timePart } = buildDateAndTimeParts(completedAt);
+  const personName = String(data.employee_name || "SelfCert").trim().replace(/\s+/g, "_");
+  const fileName = `SelfCert_${personName}_${datePart}_${timePart}.pdf`;
+
+  if (preview && typeof window !== "undefined") {
+    const blobUrl = doc.output("bloburl");
+    window.open(blobUrl, "_blank", "noopener,noreferrer");
+    return;
+  }
+
+  doc.save(fileName);
+}
+
 export default function Dashboard({ user, onSignOut }) {
+  const signatureCanvasRef = useRef(null);
+  const signatureDrawStateRef = useRef({ drawing: false, lastX: 0, lastY: 0 });
+  const managerSignatureCanvasRef = useRef(null);
+  const managerSignatureDrawStateRef = useRef({ drawing: false, lastX: 0, lastY: 0 });
   const [activeTab, setActiveTab] = useState("contracts");
   const [contracts, setContracts] = useState(CONTRACTS);
   const [isAddingContract, setIsAddingContract] = useState(false);
@@ -579,6 +872,43 @@ export default function Dashboard({ user, onSignOut }) {
   const [contractFormsLoading, setContractFormsLoading] = useState(false);
   const [contractFormsError, setContractFormsError] = useState("");
   const [selectedCompletedForm, setSelectedCompletedForm] = useState(null);
+  const [mySelfCertForms, setMySelfCertForms] = useState([]);
+  const [loadingMySelfCertForms, setLoadingMySelfCertForms] = useState(false);
+  const [mySelfCertFormsError, setMySelfCertFormsError] = useState("");
+  const [expandedMySelfCertFormId, setExpandedMySelfCertFormId] = useState(null);
+  const [nearMissModalOpen, setNearMissModalOpen] = useState(false);
+  const [nearMissSubmitting, setNearMissSubmitting] = useState(false);
+  const [nearMissReporterName, setNearMissReporterName] = useState("");
+  const [nearMissReportedAt, setNearMissReportedAt] = useState(buildNowLocalDateTimeValue());
+  const [nearMissSite, setNearMissSite] = useState("");
+  const [nearMissDetails, setNearMissDetails] = useState("");
+  const [nearMissActionsTaken, setNearMissActionsTaken] = useState("");
+  const [selfCertModalOpen, setSelfCertModalOpen] = useState(false);
+  const [selfCertSubmitting, setSelfCertSubmitting] = useState(false);
+  const [selfCertName, setSelfCertName] = useState("");
+  const [selfCertDepartment, setSelfCertDepartment] = useState("");
+  const [selfCertEmployeeNumber, setSelfCertEmployeeNumber] = useState("");
+  const [selfCertFirstDayAbsence, setSelfCertFirstDayAbsence] = useState(buildTodayIsoDate());
+  const [selfCertWorkingDaysLost, setSelfCertWorkingDaysLost] = useState("");
+  const [selfCertNotificationTo, setSelfCertNotificationTo] = useState("");
+  const [selfCertReasonSymptoms, setSelfCertReasonSymptoms] = useState("");
+  const [selfCertHadInjury, setSelfCertHadInjury] = useState(null);
+  const [selfCertInjuryDetails, setSelfCertInjuryDetails] = useState("");
+  const [selfCertInjuryOccurred, setSelfCertInjuryOccurred] = useState(null);
+  const [selfCertSoughtMedicalAdvice, setSelfCertSoughtMedicalAdvice] = useState(null);
+  const [selfCertConsultedDoctorAgain, setSelfCertConsultedDoctorAgain] = useState(null);
+  const [selfCertVisitedHospital, setSelfCertVisitedHospital] = useState(null);
+  const [selfCertEmployeeSignature, setSelfCertEmployeeSignature] = useState("");
+  const [selfCertSignatureModalOpen, setSelfCertSignatureModalOpen] = useState(false);
+  const [selfCertSignatureHasStroke, setSelfCertSignatureHasStroke] = useState(false);
+  const [pendingSelfCertApprovals, setPendingSelfCertApprovals] = useState([]);
+  const [loadingPendingSelfCertApprovals, setLoadingPendingSelfCertApprovals] = useState(false);
+  const [selfCertApprovalsModalOpen, setSelfCertApprovalsModalOpen] = useState(false);
+  const [selectedPendingSelfCert, setSelectedPendingSelfCert] = useState(null);
+  const [managerApprovalSignature, setManagerApprovalSignature] = useState("");
+  const [managerSignatureModalOpen, setManagerSignatureModalOpen] = useState(false);
+  const [managerSignatureHasStroke, setManagerSignatureHasStroke] = useState(false);
+  const [approvingPendingSelfCert, setApprovingPendingSelfCert] = useState(false);
   const [currentUserProfile, setCurrentUserProfile] = useState(null);
   const [currentAppRole, setCurrentAppRole] = useState("viewer");
   const [currentUserContractIds, setCurrentUserContractIds] = useState([]);
@@ -604,6 +934,9 @@ export default function Dashboard({ user, onSignOut }) {
     email: "",
     phone: "",
     jobRole: "",
+    employeeNumber: "",
+    lineManagerUserId: "",
+    hasDirectReports: false,
     regionsSelected: [],
     otherRegionEnabled: false,
     otherRegionText: "",
@@ -623,6 +956,18 @@ export default function Dashboard({ user, onSignOut }) {
   const selectedAccessUser = useMemo(
     () => maintenanceUsers.find((u) => u.person_key === selectedUserId) || null,
     [maintenanceUsers, selectedUserId]
+  );
+
+  const lineManagerOptions = useMemo(
+    () =>
+      maintenanceUsers
+        .filter((u) => !!u.portal_user_id)
+        .map((u) => ({
+          userId: u.portal_user_id,
+          label: u.full_name || u.email || u.portal_user_id,
+        }))
+        .sort((a, b) => a.label.localeCompare(b.label)),
+    [maintenanceUsers]
   );
 
   const teamCandidateContacts = useMemo(() => {
@@ -946,7 +1291,7 @@ export default function Dashboard({ user, onSignOut }) {
 
     const { data, error } = await supabase
       .from("user_profiles")
-      .select("full_name, job_role")
+      .select("full_name, job_role, employee_number")
       .eq("user_id", user.id)
       .maybeSingle();
 
@@ -987,6 +1332,52 @@ export default function Dashboard({ user, onSignOut }) {
       }
     }
   }, [assetLookupStatus.count, machineReg, assetNo, serialNo, assetDirectoryLookup]);
+
+  useEffect(() => {
+    if (!selfCertSignatureModalOpen) return;
+
+    const canvas = signatureCanvasRef.current;
+    if (!canvas) return;
+
+    const rect = canvas.getBoundingClientRect();
+    const dpr = window.devicePixelRatio || 1;
+    canvas.width = Math.max(1, Math.floor(rect.width * dpr));
+    canvas.height = Math.max(1, Math.floor(rect.height * dpr));
+
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.lineCap = "round";
+    ctx.lineJoin = "round";
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = "#111827";
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(0, 0, rect.width, rect.height);
+    setSelfCertSignatureHasStroke(false);
+  }, [selfCertSignatureModalOpen]);
+
+  useEffect(() => {
+    if (!managerSignatureModalOpen) return;
+
+    const canvas = managerSignatureCanvasRef.current;
+    if (!canvas) return;
+
+    const rect = canvas.getBoundingClientRect();
+    const dpr = window.devicePixelRatio || 1;
+    canvas.width = Math.max(1, Math.floor(rect.width * dpr));
+    canvas.height = Math.max(1, Math.floor(rect.height * dpr));
+
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.lineCap = "round";
+    ctx.lineJoin = "round";
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = "#111827";
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(0, 0, rect.width, rect.height);
+    setManagerSignatureHasStroke(false);
+  }, [managerSignatureModalOpen]);
 
   async function fetchContracts() {
     setContractsLoading(true);
@@ -1149,6 +1540,417 @@ export default function Dashboard({ user, onSignOut }) {
 
     setCompletedForms(data || []);
     setLoadingCompletedForms(false);
+  }
+
+  async function fetchMySelfCertForms() {
+    if (!user?.id) {
+      setMySelfCertForms([]);
+      setExpandedMySelfCertFormId(null);
+      return;
+    }
+
+    setLoadingMySelfCertForms(true);
+    setMySelfCertFormsError("");
+
+    const { data, error } = await supabase
+      .from("self_cert_forms")
+      .select(
+        "id, created_at, status, user_id, line_manager_user_id, employee_name, department, employee_number, first_day_absence, working_days_lost, notification_made_to, reason_and_symptoms, injury_occurred, injury_details, sought_medical_advice, consulted_doctor_again, visited_hospital_or_clinic, employee_signature, employee_signed_at, manager_signature, manager_signed_at"
+      )
+      .or(`user_id.eq.${user.id},line_manager_user_id.eq.${user.id}`)
+      .order("created_at", { ascending: false });
+
+    if (error) {
+      setMySelfCertFormsError(error.message || "Failed to load self cert forms.");
+      setMySelfCertForms([]);
+      setLoadingMySelfCertForms(false);
+      return;
+    }
+
+    const rows = data || [];
+    setMySelfCertForms(rows);
+    if (!rows.some((f) => f.id === expandedMySelfCertFormId)) {
+      setExpandedMySelfCertFormId(null);
+    }
+    setLoadingMySelfCertForms(false);
+  }
+
+  async function fetchPendingSelfCertApprovals() {
+    if (!user?.id) {
+      setPendingSelfCertApprovals([]);
+      return;
+    }
+
+    setLoadingPendingSelfCertApprovals(true);
+    const { data, error } = await supabase
+      .from("self_cert_forms")
+      .select(
+        "id, employee_name, department, employee_number, first_day_absence, working_days_lost, notification_made_to, reason_and_symptoms, injury_occurred, injury_details, sought_medical_advice, consulted_doctor_again, visited_hospital_or_clinic, employee_signature, employee_signed_at, created_at, status"
+      )
+      .eq("line_manager_user_id", user.id)
+      .eq("status", "pending_manager_approval")
+      .order("created_at", { ascending: false });
+
+    if (error) {
+      console.warn("Could not load pending self cert approvals:", error.message);
+      setPendingSelfCertApprovals([]);
+      setLoadingPendingSelfCertApprovals(false);
+      return;
+    }
+
+    setPendingSelfCertApprovals(data || []);
+    setLoadingPendingSelfCertApprovals(false);
+  }
+
+  function openSelfCertApprovalsModal() {
+    setSelfCertApprovalsModalOpen(true);
+    fetchPendingSelfCertApprovals();
+  }
+
+  function getManagerSignaturePoint(event) {
+    const source = event?.touches?.[0] || event?.changedTouches?.[0] || event;
+    return {
+      clientX: Number(source?.clientX || 0),
+      clientY: Number(source?.clientY || 0),
+    };
+  }
+
+  function startManagerSignatureStroke(event) {
+    const canvas = managerSignatureCanvasRef.current;
+    if (!canvas) return;
+    if (event?.cancelable) event.preventDefault();
+
+    const rect = canvas.getBoundingClientRect();
+    const { clientX, clientY } = getManagerSignaturePoint(event);
+    managerSignatureDrawStateRef.current = {
+      drawing: true,
+      lastX: clientX - rect.left,
+      lastY: clientY - rect.top,
+    };
+  }
+
+  function moveManagerSignatureStroke(event) {
+    const canvas = managerSignatureCanvasRef.current;
+    if (!canvas || !managerSignatureDrawStateRef.current.drawing) return;
+    if (event?.cancelable) event.preventDefault();
+
+    const rect = canvas.getBoundingClientRect();
+    const { clientX, clientY } = getManagerSignaturePoint(event);
+    const x = clientX - rect.left;
+    const y = clientY - rect.top;
+
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+    ctx.beginPath();
+    ctx.moveTo(managerSignatureDrawStateRef.current.lastX, managerSignatureDrawStateRef.current.lastY);
+    ctx.lineTo(x, y);
+    ctx.stroke();
+
+    managerSignatureDrawStateRef.current.lastX = x;
+    managerSignatureDrawStateRef.current.lastY = y;
+    setManagerSignatureHasStroke(true);
+  }
+
+  function endManagerSignatureStroke() {
+    managerSignatureDrawStateRef.current.drawing = false;
+  }
+
+  function clearManagerSignaturePad() {
+    const canvas = managerSignatureCanvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    setManagerSignatureHasStroke(false);
+  }
+
+  function saveManagerSignaturePad() {
+    const canvas = managerSignatureCanvasRef.current;
+    if (!canvas || !managerSignatureHasStroke) {
+      window.alert("Please sign before saving.");
+      return;
+    }
+    setManagerApprovalSignature(canvas.toDataURL("image/png"));
+    setManagerSignatureModalOpen(false);
+  }
+
+  async function approvePendingSelfCert() {
+    if (!selectedPendingSelfCert?.id) {
+      window.alert("Select a form requiring approval.");
+      return;
+    }
+    if (!managerApprovalSignature) {
+      window.alert("Please capture manager signature.");
+      return;
+    }
+
+    setApprovingPendingSelfCert(true);
+    try {
+      const { data, error } = await supabase.functions.invoke("approve-self-cert", {
+        body: {
+          formId: selectedPendingSelfCert.id,
+          managerSignature: managerApprovalSignature,
+        },
+      });
+
+      if (error || data?.success === false) {
+        throw new Error(error?.message || data?.error || "Could not approve self cert form.");
+      }
+
+      setManagerApprovalSignature("");
+      setSelectedPendingSelfCert(null);
+      await Promise.all([fetchPendingSelfCertApprovals(), fetchMySelfCertForms()]);
+      setMessage("Self cert approved from portal.");
+    } catch (error) {
+      window.alert(`Approval failed: ${error?.message || "Unknown error"}`);
+    } finally {
+      setApprovingPendingSelfCert(false);
+    }
+  }
+
+  function openNearMissModal() {
+    setNearMissReporterName(defaultCompletedByName || "");
+    setNearMissReportedAt(buildNowLocalDateTimeValue());
+    setNearMissSite(selectedLocationContract?.name || "");
+    setNearMissDetails("");
+    setNearMissActionsTaken("");
+    setNearMissModalOpen(true);
+  }
+
+  async function submitNearMissFromPortal(e) {
+    e.preventDefault();
+    if (!nearMissReporterName.trim()) {
+      window.alert("Please enter the name of the person reporting.");
+      return;
+    }
+    if (!nearMissSite.trim()) {
+      window.alert("Please enter the site.");
+      return;
+    }
+    if (!nearMissDetails.trim()) {
+      window.alert("Please add near miss details.");
+      return;
+    }
+    if (!nearMissActionsTaken.trim()) {
+      window.alert("Please describe what has been done about it.");
+      return;
+    }
+
+    setNearMissSubmitting(true);
+    try {
+      const reportedAtIso = nearMissReportedAt ? new Date(nearMissReportedAt).toISOString() : new Date().toISOString();
+      const payload = {
+        reportedAt: reportedAtIso,
+        reporterName: nearMissReporterName.trim(),
+        site: nearMissSite.trim(),
+        nearMissDetails: nearMissDetails.trim(),
+        actionsTaken: nearMissActionsTaken.trim(),
+        source: "contracts-portal",
+      };
+
+      const { data, error } = await supabase.functions.invoke("report-near-miss", {
+        body: payload,
+      });
+
+      if (error || data?.success === false) {
+        throw new Error(error?.message || data?.error || "Could not submit near miss report.");
+      }
+
+      setNearMissModalOpen(false);
+      setMessage("Near miss submitted from portal.");
+    } catch (error) {
+      window.alert(`Near miss submission failed: ${error?.message || "Unknown error"}`);
+    } finally {
+      setNearMissSubmitting(false);
+    }
+  }
+
+  async function openSelfCertModal() {
+    setSelfCertName(defaultCompletedByName || "");
+    setSelfCertDepartment(selectedLocationContract?.division || "");
+    setSelfCertEmployeeNumber(String(currentUserProfile?.employee_number || ""));
+    setSelfCertFirstDayAbsence(buildTodayIsoDate());
+    setSelfCertWorkingDaysLost("");
+    setSelfCertNotificationTo("");
+    setSelfCertReasonSymptoms("");
+    setSelfCertHadInjury(null);
+    setSelfCertInjuryDetails("");
+    setSelfCertInjuryOccurred(null);
+    setSelfCertSoughtMedicalAdvice(null);
+    setSelfCertConsultedDoctorAgain(null);
+    setSelfCertVisitedHospital(null);
+    setSelfCertEmployeeSignature("");
+    setSelfCertSignatureHasStroke(false);
+    setSelfCertModalOpen(true);
+
+    try {
+      const {
+        data: { user: authUser },
+      } = await supabase.auth.getUser();
+
+      if (!authUser?.id) return;
+
+      const { data: profile } = await supabase
+        .from("user_profiles")
+        .select("line_manager_user_id")
+        .eq("user_id", authUser.id)
+        .maybeSingle();
+
+      if (!profile?.line_manager_user_id) return;
+
+      const [{ data: managerProfile }, { data: managerDirectory }] = await Promise.all([
+        supabase
+          .from("user_profiles")
+          .select("full_name")
+          .eq("user_id", profile.line_manager_user_id)
+          .maybeSingle(),
+        supabase
+          .from("people_directory")
+          .select("full_name")
+          .eq("portal_user_id", profile.line_manager_user_id)
+          .maybeSingle(),
+      ]);
+
+      const managerName = String(managerProfile?.full_name || managerDirectory?.full_name || "").trim();
+      if (managerName) {
+        setSelfCertNotificationTo(managerName);
+      }
+    } catch (error) {
+      console.warn("Could not prefill line manager for self cert:", error?.message || error);
+    }
+  }
+
+  function getSignaturePoint(event) {
+    const source = event?.touches?.[0] || event?.changedTouches?.[0] || event;
+    return {
+      clientX: Number(source?.clientX || 0),
+      clientY: Number(source?.clientY || 0),
+    };
+  }
+
+  function startSignatureStroke(event) {
+    const canvas = signatureCanvasRef.current;
+    if (!canvas) return;
+    if (event?.cancelable) event.preventDefault();
+
+    const rect = canvas.getBoundingClientRect();
+    const { clientX, clientY } = getSignaturePoint(event);
+    signatureDrawStateRef.current = {
+      drawing: true,
+      lastX: clientX - rect.left,
+      lastY: clientY - rect.top,
+    };
+  }
+
+  function moveSignatureStroke(event) {
+    const canvas = signatureCanvasRef.current;
+    if (!canvas || !signatureDrawStateRef.current.drawing) return;
+    if (event?.cancelable) event.preventDefault();
+
+    const rect = canvas.getBoundingClientRect();
+    const { clientX, clientY } = getSignaturePoint(event);
+    const x = clientX - rect.left;
+    const y = clientY - rect.top;
+
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+    ctx.beginPath();
+    ctx.moveTo(signatureDrawStateRef.current.lastX, signatureDrawStateRef.current.lastY);
+    ctx.lineTo(x, y);
+    ctx.stroke();
+
+    signatureDrawStateRef.current.lastX = x;
+    signatureDrawStateRef.current.lastY = y;
+    setSelfCertSignatureHasStroke(true);
+  }
+
+  function endSignatureStroke() {
+    signatureDrawStateRef.current.drawing = false;
+  }
+
+  function clearSignaturePad() {
+    const canvas = signatureCanvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    setSelfCertSignatureHasStroke(false);
+  }
+
+  function saveSignaturePad() {
+    const canvas = signatureCanvasRef.current;
+    if (!canvas || !selfCertSignatureHasStroke) {
+      window.alert("Please sign before saving.");
+      return;
+    }
+    setSelfCertEmployeeSignature(canvas.toDataURL("image/png"));
+    setSelfCertSignatureModalOpen(false);
+  }
+
+  async function submitSelfCertFromPortal(e) {
+    e.preventDefault();
+    if (!selfCertName.trim()) {
+      window.alert("Please enter your name.");
+      return;
+    }
+    if (!selfCertWorkingDaysLost.trim()) {
+      window.alert("Please enter working days lost.");
+      return;
+    }
+    if (!selfCertReasonSymptoms.trim()) {
+      window.alert("Please add reason and symptoms.");
+      return;
+    }
+    if (selfCertHadInjury === true && !selfCertInjuryDetails.trim()) {
+      window.alert("Please explain how the injury occurred.");
+      return;
+    }
+    if (selfCertHadInjury === true && selfCertInjuryOccurred === null) {
+      window.alert("Please confirm whether it happened at work.");
+      return;
+    }
+    if (!selfCertEmployeeSignature) {
+      window.alert("Please capture employee signature.");
+      return;
+    }
+
+    setSelfCertSubmitting(true);
+    try {
+      const payload = {
+        name: selfCertName.trim(),
+        department: selfCertDepartment.trim(),
+        employeeNumber: selfCertEmployeeNumber.trim(),
+        firstDayOfAbsence: selfCertFirstDayAbsence,
+        workingDaysLost: Number(selfCertWorkingDaysLost),
+        notificationOfAbsenceMadeTo: selfCertNotificationTo.trim(),
+        reasonAndSymptoms: selfCertReasonSymptoms.trim(),
+        injuryOccurred: selfCertHadInjury === true ? selfCertInjuryOccurred === true : false,
+        injuryDetails: selfCertHadInjury === true ? selfCertInjuryDetails.trim() : "No injury reported",
+        soughtMedicalAdvice: selfCertSoughtMedicalAdvice === true,
+        consultedDoctorAgain: selfCertConsultedDoctorAgain === true,
+        visitedHospitalOrClinic: selfCertVisitedHospital === true,
+        employeeSignature: selfCertEmployeeSignature,
+      };
+
+      const { data, error } = await supabase.functions.invoke("submit-self-cert", {
+        body: payload,
+      });
+
+      if (error || data?.success === false) {
+        throw new Error(error?.message || data?.error || "Could not submit self cert form.");
+      }
+
+      setSelfCertModalOpen(false);
+      setFormsView("my_forms");
+      await fetchMySelfCertForms();
+      setMessage("Self cert submitted from portal.");
+    } catch (error) {
+      window.alert(`Self cert submission failed: ${error?.message || "Unknown error"}`);
+    } finally {
+      setSelfCertSubmitting(false);
+    }
   }
 
   async function fetchContractCompletedForms(contract) {
@@ -1433,6 +2235,9 @@ export default function Dashboard({ user, onSignOut }) {
       email: row.email || "",
       phone: row.phone || "",
       job_role: row.job_role || "",
+      employee_number: "",
+      line_manager_user_id: "",
+      has_direct_reports: false,
       divisions: row.regions || [],
       regionsText: (row.regions || []).join(", "),
       assignedContracts: [],
@@ -1440,6 +2245,23 @@ export default function Dashboard({ user, onSignOut }) {
 
     const linkedUserIds = merged.map((u) => u.portal_user_id).filter(Boolean);
     if (linkedUserIds.length > 0) {
+      const { data: profileRows, error: profileError } = await supabase
+        .from("user_profiles")
+        .select("user_id, employee_number, line_manager_user_id, has_direct_reports")
+        .in("user_id", linkedUserIds);
+
+      if (!profileError) {
+        const profileByUserId = new Map((profileRows || []).map((row) => [row.user_id, row]));
+        merged.forEach((u) => {
+          if (!u.portal_user_id) return;
+          const profile = profileByUserId.get(u.portal_user_id);
+          if (!profile) return;
+          u.employee_number = profile.employee_number || "";
+          u.line_manager_user_id = profile.line_manager_user_id || "";
+          u.has_direct_reports = profile.has_direct_reports === true;
+        });
+      }
+
       const { data: assignments, error: assignmentsError } = await supabase
         .from("contract_team_roles")
         .select("user_id, contracts(name, contract_number)")
@@ -1641,6 +2463,9 @@ export default function Dashboard({ user, onSignOut }) {
       job_role: userRow.job_role || null,
       authority: userRow.authority || "user",
       regions: parsedRegions,
+      employee_number: String(userRow.employee_number || "").trim() || null,
+      line_manager_user_id: String(userRow.line_manager_user_id || "").trim() || null,
+      has_direct_reports: userRow.has_direct_reports === true,
     };
 
     const [roleRes, profileRes] = await Promise.all([
@@ -1694,6 +2519,9 @@ export default function Dashboard({ user, onSignOut }) {
           displayName: newUserDraft.displayName.trim(),
           phone: newUserDraft.phone.trim() || null,
           jobRole: newUserDraft.jobRole.trim() || null,
+          employeeNumber: newUserDraft.employeeNumber.trim() || null,
+          lineManagerUserId: newUserDraft.lineManagerUserId.trim() || null,
+          hasDirectReports: newUserDraft.hasDirectReports === true,
           regions: selectedRegions,
           authority: newUserDraft.authority,
         },
@@ -1729,6 +2557,9 @@ export default function Dashboard({ user, onSignOut }) {
         email: "",
         phone: "",
         jobRole: "",
+        employeeNumber: "",
+        lineManagerUserId: "",
+        hasDirectReports: false,
         regionsSelected: [],
         otherRegionEnabled: false,
         otherRegionText: "",
@@ -1762,6 +2593,9 @@ export default function Dashboard({ user, onSignOut }) {
           job_role: newUserDraft.jobRole || null,
           authority: newUserDraft.authority || "user",
           regions: selectedRegions,
+          employee_number: String(newUserDraft.employeeNumber || "").trim() || null,
+          line_manager_user_id: String(newUserDraft.lineManagerUserId || "").trim() || null,
+          has_direct_reports: newUserDraft.hasDirectReports === true,
         },
         { onConflict: "user_id" }
       ),
@@ -1807,6 +2641,9 @@ export default function Dashboard({ user, onSignOut }) {
       email: "",
       phone: "",
       jobRole: "",
+      employeeNumber: "",
+      lineManagerUserId: "",
+      hasDirectReports: false,
       regionsSelected: [],
       otherRegionEnabled: false,
       otherRegionText: "",
@@ -1854,6 +2691,24 @@ export default function Dashboard({ user, onSignOut }) {
       fetchCompletedForms();
     }
   }, [activeTab, formsView, currentAppRole, currentUserContractIds]);
+
+  useEffect(() => {
+    if (activeTab === "forms" && formsView === "my_forms") {
+      fetchMySelfCertForms();
+    }
+  }, [activeTab, formsView, user?.id]);
+
+  useEffect(() => {
+    fetchPendingSelfCertApprovals();
+  }, [user?.id]);
+
+  useEffect(() => {
+    if (!user?.id) return;
+    const timer = window.setInterval(() => {
+      fetchPendingSelfCertApprovals();
+    }, 45000);
+    return () => window.clearInterval(timer);
+  }, [user?.id]);
 
   useEffect(() => {
     if (!selectedCompletedForm) return;
@@ -2717,6 +3572,8 @@ export default function Dashboard({ user, onSignOut }) {
 
   function renderFormsTab() {
     const showAssigned = formsView === "assigned";
+    const showCompleted = formsView === "completed";
+    const showMyForms = formsView === "my_forms";
 
     return (
       <div>
@@ -2733,6 +3590,12 @@ export default function Dashboard({ user, onSignOut }) {
           >
             Completed Forms
           </button>
+          <button
+            className={`forms-subtab-btn ${formsView === "my_forms" ? "active" : ""}`}
+            onClick={() => setFormsView("my_forms")}
+          >
+            My Forms
+          </button>
         </div>
 
         {showAssigned && (
@@ -2740,6 +3603,15 @@ export default function Dashboard({ user, onSignOut }) {
             <section className="card tab-card">
               <h2>Assigned Forms</h2>
               <p className="sub">Select a contract below to view forms assigned to that contract.</p>
+
+              <div className="portal-form-launch">
+                <button type="button" className="secondary" onClick={openNearMissModal}>
+                  Complete Near Miss (Portal)
+                </button>
+                <button type="button" className="secondary" onClick={openSelfCertModal}>
+                  Complete Self Cert (Portal)
+                </button>
+              </div>
 
               <label>Location</label>
               <select
@@ -2902,7 +3774,7 @@ export default function Dashboard({ user, onSignOut }) {
           </div>
         )}
 
-        {!showAssigned && (
+        {showCompleted && (
           <section className="card tab-card">
             <h2>Completed Forms</h2>
             <p className="sub">View all saved forms and filter by plant type, contract, and defect status.</p>
@@ -3029,6 +3901,93 @@ export default function Dashboard({ user, onSignOut }) {
             )}
           </section>
         )}
+
+        {showMyForms && (
+          <section className="card tab-card">
+            <h2>My Forms</h2>
+
+            {loadingMySelfCertForms && <p className="sub">Loading self cert forms...</p>}
+            {mySelfCertFormsError && <p className="msg">Failed to load self cert forms: {mySelfCertFormsError}</p>}
+
+            {!loadingMySelfCertForms && !mySelfCertFormsError && (
+              <div>
+                {mySelfCertForms.length === 0 && <p className="sub">No self cert forms found.</p>}
+
+                {mySelfCertForms.map((form) => {
+                  const isExpanded = expandedMySelfCertFormId === form.id;
+                  return (
+                    <section key={form.id} className="readonly-form-panel" style={{ marginBottom: 12 }}>
+                      <button
+                        type="button"
+                        className="readonly-form-head"
+                        style={{ width: "100%", textAlign: "left", background: "transparent", border: "none", cursor: "pointer" }}
+                        onClick={() =>
+                          setExpandedMySelfCertFormId((prev) => (prev === form.id ? null : form.id))
+                        }
+                      >
+                        <div className="readonly-form-head-left">
+                          <span className="form-type-pill">Self Certification Form</span>
+                          <h3>Self Certification Form</h3>
+                        </div>
+                        <span className="lock-pill">{isExpanded ? "LOCKED | Collapse" : "LOCKED | Expand"}</span>
+                      </button>
+
+                      <p className="sub">
+                        Submitted {form.created_at ? new Date(form.created_at).toLocaleString() : "-"}
+                        {" "}
+                        | Status: {form.status || "-"}
+                        {" "}
+                        | Employee: {form.employee_name || "-"}
+                      </p>
+
+                      {isExpanded && (
+                        <>
+                          <div className="readonly-meta-grid">
+                            <div><strong>Employee Name</strong><p>{form.employee_name || "-"}</p></div>
+                            <div><strong>Department</strong><p>{form.department || "-"}</p></div>
+                            <div><strong>Employee Number</strong><p>{form.employee_number || "-"}</p></div>
+                            <div><strong>First Day of Absence</strong><p>{form.first_day_absence || "-"}</p></div>
+                            <div><strong>Working Days Lost</strong><p>{form.working_days_lost ?? "-"}</p></div>
+                            <div><strong>Notification Made To</strong><p>{form.notification_made_to || "-"}</p></div>
+                          </div>
+
+                          <label>Reason and Symptoms</label>
+                          <textarea value={form.reason_and_symptoms || ""} readOnly rows={4} />
+
+                          <div className="readonly-meta-grid">
+                            <div><strong>Happened At Work</strong><p>{formatYesNo(form.injury_occurred)}</p></div>
+                            <div><strong>Sought Medical Advice</strong><p>{formatYesNo(form.sought_medical_advice)}</p></div>
+                            <div><strong>Consulted Doctor Again</strong><p>{formatYesNo(form.consulted_doctor_again)}</p></div>
+                            <div><strong>Visited Hospital/Clinic</strong><p>{formatYesNo(form.visited_hospital_or_clinic)}</p></div>
+                          </div>
+
+                          <label>Injury Details</label>
+                          <textarea value={form.injury_details || ""} readOnly rows={3} />
+
+                          <div className="readonly-meta-grid">
+                            <div><strong>Employee Signature</strong><p>{displaySignatureValue(form.employee_signature)}</p></div>
+                            <div><strong>Employee Signed At</strong><p>{form.employee_signed_at ? new Date(form.employee_signed_at).toLocaleString() : "-"}</p></div>
+                            <div><strong>Manager Signature</strong><p>{displaySignatureValue(form.manager_signature)}</p></div>
+                            <div><strong>Manager Signed At</strong><p>{form.manager_signed_at ? new Date(form.manager_signed_at).toLocaleString() : "-"}</p></div>
+                          </div>
+
+                          <div className="actions-row">
+                            <button type="button" className="secondary" onClick={() => generateSelfCertA4Pdf(form, { preview: true })}>
+                              Preview PDF (A4)
+                            </button>
+                            <button type="button" className="secondary" onClick={() => generateSelfCertA4Pdf(form)}>
+                              Download PDF (A4)
+                            </button>
+                          </div>
+                        </>
+                      )}
+                    </section>
+                  );
+                })}
+              </div>
+            )}
+          </section>
+        )}
       </div>
     );
   }
@@ -3148,6 +4107,40 @@ export default function Dashboard({ user, onSignOut }) {
                           </label>
 
                           <label>
+                            Employee Number
+                            <input
+                              value={u.employee_number || ""}
+                              onChange={(e) => handleUserFieldChange(u.person_key, "employee_number", e.target.value)}
+                            />
+                          </label>
+
+                          <label>
+                            Line Manager
+                            <select
+                              value={u.line_manager_user_id || ""}
+                              onChange={(e) => handleUserFieldChange(u.person_key, "line_manager_user_id", e.target.value)}
+                            >
+                              <option value="">None</option>
+                              {lineManagerOptions.map((manager) => (
+                                <option key={manager.userId} value={manager.userId}>
+                                  {manager.label}
+                                </option>
+                              ))}
+                            </select>
+                          </label>
+
+                          <label>
+                            Has Direct Reports
+                            <select
+                              value={u.has_direct_reports ? "yes" : "no"}
+                              onChange={(e) => handleUserFieldChange(u.person_key, "has_direct_reports", e.target.value === "yes")}
+                            >
+                              <option value="no">No</option>
+                              <option value="yes">Yes</option>
+                            </select>
+                          </label>
+
+                          <label>
                             Regions (comma separated)
                             <input
                               value={u.regionsText}
@@ -3199,6 +4192,34 @@ export default function Dashboard({ user, onSignOut }) {
                   value={newUserDraft.jobRole}
                   onChange={(e) => setNewUserDraft((prev) => ({ ...prev, jobRole: e.target.value }))}
                 />
+
+                <label>Employee Number</label>
+                <input
+                  value={newUserDraft.employeeNumber}
+                  onChange={(e) => setNewUserDraft((prev) => ({ ...prev, employeeNumber: e.target.value }))}
+                />
+
+                <label>Line Manager</label>
+                <select
+                  value={newUserDraft.lineManagerUserId}
+                  onChange={(e) => setNewUserDraft((prev) => ({ ...prev, lineManagerUserId: e.target.value }))}
+                >
+                  <option value="">None</option>
+                  {lineManagerOptions.map((manager) => (
+                    <option key={manager.userId} value={manager.userId}>
+                      {manager.label}
+                    </option>
+                  ))}
+                </select>
+
+                <label>Has Direct Reports</label>
+                <select
+                  value={newUserDraft.hasDirectReports ? "yes" : "no"}
+                  onChange={(e) => setNewUserDraft((prev) => ({ ...prev, hasDirectReports: e.target.value === "yes" }))}
+                >
+                  <option value="no">No</option>
+                  <option value="yes">Yes</option>
+                </select>
 
                 <label>Regions</label>
                 <button
@@ -3294,6 +4315,428 @@ export default function Dashboard({ user, onSignOut }) {
           </div>
         )}
       </section>
+    );
+  }
+
+  function renderNearMissModal() {
+    if (!nearMissModalOpen) return null;
+
+    return (
+      <div className="mini-modal-backdrop" onClick={() => !nearMissSubmitting && setNearMissModalOpen(false)}>
+        <section className="mini-modal portal-form-modal" onClick={(e) => e.stopPropagation()}>
+          <header className="mini-modal-header">
+            <h3>Near Miss</h3>
+            <button
+              type="button"
+              className="secondary mini"
+              onClick={() => setNearMissModalOpen(false)}
+              disabled={nearMissSubmitting}
+            >
+              Close
+            </button>
+          </header>
+
+          <form onSubmit={submitNearMissFromPortal}>
+            <label>Time / Date</label>
+            <input
+              type="datetime-local"
+              value={nearMissReportedAt}
+              onChange={(e) => setNearMissReportedAt(e.target.value)}
+              required
+            />
+
+            <label>Name of person reporting</label>
+            <input
+              value={nearMissReporterName}
+              onChange={(e) => setNearMissReporterName(e.target.value)}
+              placeholder="Enter name"
+              required
+            />
+
+            <label>Site</label>
+            <input
+              value={nearMissSite}
+              onChange={(e) => setNearMissSite(e.target.value)}
+              placeholder="Enter site"
+              list="near-miss-site-options"
+              required
+            />
+            <datalist id="near-miss-site-options">
+              {visibleContracts.map((contract) => (
+                <option key={contract.id} value={contract.name} />
+              ))}
+            </datalist>
+
+            <label>Near Miss Details (Don't Use People's Names)</label>
+            <textarea
+              rows={4}
+              value={nearMissDetails}
+              onChange={(e) => setNearMissDetails(e.target.value)}
+              placeholder="Describe what the near miss was"
+              required
+            />
+
+            <label>What has been done about it</label>
+            <textarea
+              rows={4}
+              value={nearMissActionsTaken}
+              onChange={(e) => setNearMissActionsTaken(e.target.value)}
+              placeholder="Describe actions taken"
+              required
+            />
+
+            <div className="actions-row" style={{ marginTop: 12 }}>
+              <button type="button" className="secondary" onClick={() => setNearMissModalOpen(false)} disabled={nearMissSubmitting}>
+                Cancel
+              </button>
+              <button type="submit" disabled={nearMissSubmitting}>
+                {nearMissSubmitting ? "Submitting..." : "Submit Near Miss"}
+              </button>
+            </div>
+          </form>
+        </section>
+      </div>
+    );
+  }
+
+  function renderSelfCertModal() {
+    if (!selfCertModalOpen) return null;
+
+    return (
+      <div className="mini-modal-backdrop" onClick={() => !selfCertSubmitting && setSelfCertModalOpen(false)}>
+        <section className="mini-modal portal-form-modal" onClick={(e) => e.stopPropagation()}>
+          <header className="mini-modal-header">
+            <h3>Self Cert</h3>
+            <button
+              type="button"
+              className="secondary mini"
+              onClick={() => setSelfCertModalOpen(false)}
+              disabled={selfCertSubmitting}
+            >
+              Close
+            </button>
+          </header>
+
+          <form onSubmit={submitSelfCertFromPortal}>
+            <label>Name</label>
+            <input value={selfCertName} onChange={(e) => setSelfCertName(e.target.value)} required />
+
+            <label>Department</label>
+            <input value={selfCertDepartment} onChange={(e) => setSelfCertDepartment(e.target.value)} />
+
+            <label>Employee Number</label>
+            <input value={selfCertEmployeeNumber} onChange={(e) => setSelfCertEmployeeNumber(e.target.value)} />
+
+            <label>First day of absence</label>
+            <input type="date" value={selfCertFirstDayAbsence} onChange={(e) => setSelfCertFirstDayAbsence(e.target.value)} required />
+
+            <label>Working days lost</label>
+            <input
+              type="number"
+              min="0"
+              value={selfCertWorkingDaysLost}
+              onChange={(e) => setSelfCertWorkingDaysLost(e.target.value)}
+              required
+            />
+
+            <label>Notification of absence made to</label>
+            <input value={selfCertNotificationTo} onChange={(e) => setSelfCertNotificationTo(e.target.value)} />
+
+            <label>Reason for absence and symptoms</label>
+            <textarea
+              rows={4}
+              value={selfCertReasonSymptoms}
+              onChange={(e) => setSelfCertReasonSymptoms(e.target.value)}
+              required
+            />
+
+            <label>Was there an injury?</label>
+            <div className="portal-yes-no-row">
+              <button
+                type="button"
+                className={`portal-yes-no-btn ${selfCertHadInjury === true ? "active" : ""}`}
+                onClick={() => setSelfCertHadInjury(true)}
+              >
+                Yes
+              </button>
+              <button
+                type="button"
+                className={`portal-yes-no-btn ${selfCertHadInjury === false ? "active" : ""}`}
+                onClick={() => {
+                  setSelfCertHadInjury(false);
+                  setSelfCertInjuryOccurred(false);
+                  setSelfCertInjuryDetails("");
+                }}
+              >
+                No
+              </button>
+            </div>
+
+            {selfCertHadInjury === true && (
+              <>
+                <label>If an injury, specify how it occurred</label>
+                <textarea
+                  rows={3}
+                  value={selfCertInjuryDetails}
+                  onChange={(e) => setSelfCertInjuryDetails(e.target.value)}
+                />
+              </>
+            )}
+
+            <label>Did it happen at work?</label>
+            <div className="portal-yes-no-row">
+              <button
+                type="button"
+                className={`portal-yes-no-btn ${selfCertInjuryOccurred === true ? "active" : ""}`}
+                onClick={() => setSelfCertInjuryOccurred(true)}
+              >
+                Yes
+              </button>
+              <button
+                type="button"
+                className={`portal-yes-no-btn ${selfCertInjuryOccurred === false ? "active" : ""}`}
+                onClick={() => setSelfCertInjuryOccurred(false)}
+              >
+                No
+              </button>
+            </div>
+
+            <label>Did you seek medical advice?</label>
+            <div className="portal-yes-no-row">
+              <button
+                type="button"
+                className={`portal-yes-no-btn ${selfCertSoughtMedicalAdvice === true ? "active" : ""}`}
+                onClick={() => setSelfCertSoughtMedicalAdvice(true)}
+              >
+                Yes
+              </button>
+              <button
+                type="button"
+                className={`portal-yes-no-btn ${selfCertSoughtMedicalAdvice === false ? "active" : ""}`}
+                onClick={() => setSelfCertSoughtMedicalAdvice(false)}
+              >
+                No
+              </button>
+            </div>
+
+            <label>Did you consult your doctor again?</label>
+            <div className="portal-yes-no-row">
+              <button
+                type="button"
+                className={`portal-yes-no-btn ${selfCertConsultedDoctorAgain === true ? "active" : ""}`}
+                onClick={() => setSelfCertConsultedDoctorAgain(true)}
+              >
+                Yes
+              </button>
+              <button
+                type="button"
+                className={`portal-yes-no-btn ${selfCertConsultedDoctorAgain === false ? "active" : ""}`}
+                onClick={() => setSelfCertConsultedDoctorAgain(false)}
+              >
+                No
+              </button>
+            </div>
+
+            <label>Did you visit a hospital or clinic?</label>
+            <div className="portal-yes-no-row">
+              <button
+                type="button"
+                className={`portal-yes-no-btn ${selfCertVisitedHospital === true ? "active" : ""}`}
+                onClick={() => setSelfCertVisitedHospital(true)}
+              >
+                Yes
+              </button>
+              <button
+                type="button"
+                className={`portal-yes-no-btn ${selfCertVisitedHospital === false ? "active" : ""}`}
+                onClick={() => setSelfCertVisitedHospital(false)}
+              >
+                No
+              </button>
+            </div>
+
+            <label>Employee Signature</label>
+            <button type="button" className="secondary" onClick={() => setSelfCertSignatureModalOpen(true)}>
+              {selfCertEmployeeSignature ? "Signature captured (click to re-sign)" : "Tap/click to sign with mouse"}
+            </button>
+
+            <div className="actions-row" style={{ marginTop: 12 }}>
+              <button type="button" className="secondary" onClick={() => setSelfCertModalOpen(false)} disabled={selfCertSubmitting}>
+                Cancel
+              </button>
+              <button type="submit" disabled={selfCertSubmitting}>
+                {selfCertSubmitting ? "Submitting..." : "Submit Self Cert"}
+              </button>
+            </div>
+          </form>
+
+          {selfCertSignatureModalOpen && (
+            <div className="mini-modal-backdrop" onClick={() => setSelfCertSignatureModalOpen(false)}>
+              <section className="mini-modal signature-capture-modal" onClick={(e) => e.stopPropagation()}>
+                <header className="mini-modal-header">
+                  <h3>Sign Below</h3>
+                  <button type="button" className="secondary mini" onClick={() => setSelfCertSignatureModalOpen(false)}>
+                    Close
+                  </button>
+                </header>
+
+                <canvas
+                  ref={signatureCanvasRef}
+                  className="signature-canvas"
+                  onMouseDown={startSignatureStroke}
+                  onMouseMove={moveSignatureStroke}
+                  onMouseUp={endSignatureStroke}
+                  onMouseLeave={endSignatureStroke}
+                  onTouchStart={startSignatureStroke}
+                  onTouchMove={moveSignatureStroke}
+                  onTouchEnd={endSignatureStroke}
+                />
+
+                <div className="actions-row" style={{ marginTop: 10 }}>
+                  <button type="button" className="secondary" onClick={clearSignaturePad}>Clear</button>
+                  <button type="button" onClick={saveSignaturePad}>Save Signature</button>
+                </div>
+              </section>
+            </div>
+          )}
+        </section>
+      </div>
+    );
+  }
+
+  function renderSelfCertApprovalsModal() {
+    if (!selfCertApprovalsModalOpen) return null;
+
+    return (
+      <div className="mini-modal-backdrop" onClick={() => setSelfCertApprovalsModalOpen(false)}>
+        <section className="mini-modal portal-form-modal" onClick={(e) => e.stopPropagation()}>
+          <header className="mini-modal-header">
+            <h3>Self Cert Approvals</h3>
+            <button type="button" className="secondary mini" onClick={() => setSelfCertApprovalsModalOpen(false)}>
+              Close
+            </button>
+          </header>
+
+          {loadingPendingSelfCertApprovals && <p className="sub">Loading pending approvals...</p>}
+
+          {!loadingPendingSelfCertApprovals && pendingSelfCertApprovals.length === 0 && (
+            <p className="sub">No forms requiring review right now.</p>
+          )}
+
+          <div className="list" style={{ marginBottom: 12 }}>
+            {pendingSelfCertApprovals.map((item) => (
+              <button
+                key={item.id}
+                type="button"
+                className={`contract-item contract-card ${selectedPendingSelfCert?.id === item.id ? "active" : ""}`}
+                onClick={() => {
+                  setSelectedPendingSelfCert(item);
+                  setManagerApprovalSignature("");
+                  setManagerSignatureModalOpen(false);
+                  setManagerSignatureHasStroke(false);
+                }}
+              >
+                <div>
+                  <strong>{item.employee_name || "Employee"}</strong>
+                  <span>{item.department || "-"}</span>
+                  <span>First day: {item.first_day_absence || "-"}</span>
+                  <span>Days lost: {item.working_days_lost ?? "-"}</span>
+                </div>
+                <span className="lock-pill">Pending</span>
+              </button>
+            ))}
+          </div>
+
+          {selectedPendingSelfCert && (
+            <section className="readonly-form-panel">
+              <div className="readonly-form-head">
+                <h3>Approve Self Cert</h3>
+                <span className="lock-pill">REVIEW</span>
+              </div>
+
+              <h4 style={{ marginBottom: 6 }}>Employee Details</h4>
+              <div className="readonly-meta-grid">
+                <div><strong>Employee Name</strong><p>{selectedPendingSelfCert.employee_name || "-"}</p></div>
+                <div><strong>Department</strong><p>{selectedPendingSelfCert.department || "-"}</p></div>
+                <div><strong>Employee Number</strong><p>{selectedPendingSelfCert.employee_number || "-"}</p></div>
+                <div><strong>Submitted</strong><p>{selectedPendingSelfCert.created_at ? new Date(selectedPendingSelfCert.created_at).toLocaleString() : "-"}</p></div>
+              </div>
+
+              <h4 style={{ marginBottom: 6, marginTop: 12 }}>Absence Details</h4>
+              <div className="readonly-meta-grid">
+                <div><strong>First Day of Absence</strong><p>{selectedPendingSelfCert.first_day_absence || "-"}</p></div>
+                <div><strong>Working Days Lost</strong><p>{selectedPendingSelfCert.working_days_lost ?? "-"}</p></div>
+                <div><strong>Notification Made To</strong><p>{selectedPendingSelfCert.notification_made_to || "-"}</p></div>
+                <div><strong>Status</strong><p>{selectedPendingSelfCert.status || "-"}</p></div>
+              </div>
+
+              <label>Reason and Symptoms</label>
+              <textarea value={selectedPendingSelfCert.reason_and_symptoms || ""} readOnly rows={3} />
+
+              <h4 style={{ marginBottom: 6, marginTop: 12 }}>Medical / Injury</h4>
+              <div className="readonly-meta-grid">
+                <div><strong>Happened At Work</strong><p>{formatYesNo(selectedPendingSelfCert.injury_occurred)}</p></div>
+                <div><strong>Sought Medical Advice</strong><p>{formatYesNo(selectedPendingSelfCert.sought_medical_advice)}</p></div>
+                <div><strong>Consulted Doctor Again</strong><p>{formatYesNo(selectedPendingSelfCert.consulted_doctor_again)}</p></div>
+                <div><strong>Visited Hospital/Clinic</strong><p>{formatYesNo(selectedPendingSelfCert.visited_hospital_or_clinic)}</p></div>
+              </div>
+
+              <label>Injury Details</label>
+              <textarea value={selectedPendingSelfCert.injury_details || ""} readOnly rows={3} />
+
+              <h4 style={{ marginBottom: 6, marginTop: 12 }}>Employee Signature</h4>
+              <div className="readonly-meta-grid">
+                <div><strong>Employee Signature</strong><p>{displaySignatureValue(selectedPendingSelfCert.employee_signature)}</p></div>
+                <div><strong>Employee Signed At</strong><p>{selectedPendingSelfCert.employee_signed_at ? new Date(selectedPendingSelfCert.employee_signed_at).toLocaleString() : "-"}</p></div>
+              </div>
+
+              <label>Manager Signature</label>
+              <button type="button" className="secondary" onClick={() => setManagerSignatureModalOpen(true)}>
+                {managerApprovalSignature ? "Signature captured (click to re-sign)" : "Tap/click to sign with mouse"}
+              </button>
+
+              <div className="actions-row" style={{ marginTop: 12 }}>
+                <button type="button" className="secondary" onClick={() => setSelectedPendingSelfCert(null)} disabled={approvingPendingSelfCert}>
+                  Cancel
+                </button>
+                <button type="button" onClick={approvePendingSelfCert} disabled={approvingPendingSelfCert}>
+                  {approvingPendingSelfCert ? "Approving..." : "Approve"}
+                </button>
+              </div>
+            </section>
+          )}
+
+          {managerSignatureModalOpen && (
+            <div className="mini-modal-backdrop" onClick={() => setManagerSignatureModalOpen(false)}>
+              <section className="mini-modal signature-capture-modal" onClick={(e) => e.stopPropagation()}>
+                <header className="mini-modal-header">
+                  <h3>Manager Signature</h3>
+                  <button type="button" className="secondary mini" onClick={() => setManagerSignatureModalOpen(false)}>
+                    Close
+                  </button>
+                </header>
+
+                <canvas
+                  ref={managerSignatureCanvasRef}
+                  className="signature-canvas"
+                  onMouseDown={startManagerSignatureStroke}
+                  onMouseMove={moveManagerSignatureStroke}
+                  onMouseUp={endManagerSignatureStroke}
+                  onMouseLeave={endManagerSignatureStroke}
+                  onTouchStart={startManagerSignatureStroke}
+                  onTouchMove={moveManagerSignatureStroke}
+                  onTouchEnd={endManagerSignatureStroke}
+                />
+
+                <div className="actions-row" style={{ marginTop: 10 }}>
+                  <button type="button" className="secondary" onClick={clearManagerSignaturePad}>Clear</button>
+                  <button type="button" onClick={saveManagerSignaturePad}>Save Signature</button>
+                </div>
+              </section>
+            </div>
+          )}
+        </section>
+      </div>
     );
   }
 
@@ -3455,7 +4898,16 @@ export default function Dashboard({ user, onSignOut }) {
             <h1>Home</h1>
             <p>{user?.email}</p>
           </div>
-          <button className="secondary" onClick={signOut}>Sign Out</button>
+          <div className="topbar-actions">
+            <button type="button" className="secondary topbar-bell" onClick={openSelfCertApprovalsModal}>
+              <span aria-hidden="true">🔔</span>
+              <span>Approvals</span>
+              {pendingSelfCertApprovals.length > 0 && (
+                <span className="topbar-badge">{pendingSelfCertApprovals.length > 99 ? "99+" : pendingSelfCertApprovals.length}</span>
+              )}
+            </button>
+            <button className="secondary" onClick={signOut}>Sign Out</button>
+          </div>
         </header>
 
         <div className="tabs">
@@ -3485,6 +4937,9 @@ export default function Dashboard({ user, onSignOut }) {
       </div>
 
       {renderContractModal()}
+      {renderSelfCertApprovalsModal()}
+      {renderNearMissModal()}
+      {renderSelfCertModal()}
       {renderDefectCaptureModal()}
     </>
   );

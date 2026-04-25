@@ -82,6 +82,9 @@ Deno.serve(async (req) => {
     const phoneInput = body?.phone ? String(body.phone).trim() : null;
     const phone = normalizePhoneToE164(phoneInput);
     const jobRole = body?.jobRole ? String(body.jobRole).trim() : null;
+    const employeeNumber = body?.employeeNumber ? String(body.employeeNumber).trim() : null;
+    const lineManagerUserId = body?.lineManagerUserId ? String(body.lineManagerUserId).trim() : null;
+    const hasDirectReports = body?.hasDirectReports === true;
     const regions = Array.isArray(body?.regions)
       ? body.regions.map((r: unknown) => String(r).trim()).filter(Boolean)
       : [];
@@ -225,6 +228,9 @@ Deno.serve(async (req) => {
         job_role: jobRole,
         authority,
         regions,
+        employee_number: employeeNumber,
+        line_manager_user_id: lineManagerUserId,
+        has_direct_reports: hasDirectReports,
         source_project: "portal",
       },
       { onConflict: "user_id" }
